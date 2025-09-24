@@ -1,59 +1,66 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
-/**
- * Minimal "cn" helper (like classnames)
- */
+/** =======================
+ *  Tiny utilities
+ *  ======================= */
 function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
+const LSK_USERS = "fe_users_v1";
+const LSK_AUTH = "fe_auth_v1";
 
-/**
- * ---------- FACTORS & HELPERS ----------
- */
-const FACTORS = {
-  TaskType: { Feature: 1.0, Bug: 1.1, Refactor: 0.9, Spike: 1.1 },
-  Complexity: { Simple: 0.75, Medium: 1.0, High: 1.5, "Very High": 2.0 },
-  CodeImpact: { Modify: 1.0, New: 1.3, BugFix: 1.1, Refactor: 0.9, Spike: 1.2 },
-  Dependencies: { None: 0.9, Few: 1.0, Many: 1.2, External: 1.4 },
-  TechNovelty: { Familiar: 0.9, Mixed: 1.1, New: 1.3 },
-  MeetingsLoad: { Low: 0.9, Medium: 1.0, High: 1.2 },
-  DeveloperLevel: { Senior: 0.8, Mid: 1.0, Junior: 1.2 },
-  LOCBucket: { "<100": 0.8, "100–300": 1.0, "300–700": 1.3, ">700": 1.6 },
-  AvailabilityFactor: { "100%": 1.0, "50%": 1.5, "25%": 1.75 },
-} as const;
+type Role = "BA/PMO" | "Developer";
+type UserRec = { username: string; password: string; role: Role };
+type UserMap = Record<string, UserRec>;
+type AuthState = { username: string; role: Role } | null;
 
-const RISK = { Low: 0.05, Medium: 0.15, High: 0.3 } as const;
-
-function product(values: number[]): number {
-  return values.reduce((a, v) => a * v, 1);
+/** Seed demo users if none exist */
+function seedUsersIfEmpty() {
+  const raw = localStorage.getItem(LSK_USERS);
+  if (raw) return;
+  const users: UserMap = {
+    ba: { username: "ba", password: "1234", role: "BA/PMO" },
+    dev: { username: "dev", password: "1234", role: "Developer" },
+    admin: { username: "admin", password: "admin", role: "BA/PMO" },
+  };
+  localStorage.setItem(LSK_USERS, JSON.stringify(users));
 }
-function ceil(num: number, precision = 0): number {
-  const p = Math.pow(10, precision);
-  return Math.ceil(num * p) / p;
-}
-function addWorkdays(start: Date, nDays: number): Date {
-  let daysRemaining = nDays;
-  const d = new Date(start);
-  d.setHours(0, 0, 0, 0);
-  while (daysRemaining > 0) {
-    d.setDate(d.getDate() + 1);
-    const day = d.getDay();
-    if (day !== 0 && day !== 6) daysRemaining -= 1;
+function readUsers(): UserMap {
+  try {
+    const raw = localStorage.getItem(LSK_USERS);
+    return raw ? (JSON.parse(raw) as UserMap) : {};
+  } catch {
+    return {};
   }
-  return d;
 }
-function formatDateISO(d: Date | null): string {
-  if (!d) return "";
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+function upsertUser(u: UserRec) {
+  const users = readUsers();
+  users[u.username] = u;
+  localStorage.setItem(LSK_USERS, JSON.stringify(users));
+}
+function verifyPassword(username: string, password: string): AuthState {
+  const users = readUsers();
+  const rec = users[username];
+  if (!rec) return null;
+  if (rec.password !== password) return null;
+  return { username: rec.username, role: rec.role };
+}
+function getAuth(): AuthState {
+  try {
+    const raw = localStorage.getItem(LSK_AUTH);
+    return raw ? (JSON.parse(raw) as AuthState) : null;
+  } catch {
+    return null;
+  }
+}
+function setAuth(auth: AuthState) {
+  if (!auth) localStorage.removeItem(LSK_AUTH);
+  else localStorage.setItem(LSK_AUTH, JSON.stringify(auth));
 }
 
-/**
- * ---------- LIGHTWEIGHT UI (Card, Label, Input, Button) ----------
- * No external libraries needed.
- */
+/** =======================
+ *  Lightweight UI bits
+ *  ======================= */
 function Card(props: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
@@ -67,9 +74,7 @@ function Card(props: React.HTMLAttributes<HTMLDivElement>) {
   );
 }
 function CardHeader(props: React.HTMLAttributes<HTMLDivElement>) {
-  return (
-    <div {...props} className={cn("px-5 pt-5 pb-3", props.className)} />
-  );
+  return <div {...props} className={cn("px-5 pt-5 pb-3", props.className)} />;
 }
 function CardTitle(props: React.HTMLAttributes<HTMLDivElement>) {
   return (
@@ -110,7 +115,9 @@ function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
   );
 }
 function Button(
-  props: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "solid" | "outline" }
+  props: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+    variant?: "solid" | "outline";
+  }
 ) {
   const { variant = "solid", ...rest } = props;
   const base =
@@ -126,10 +133,180 @@ function Button(
     />
   );
 }
+function HelperText(props: { children: React.ReactNode; tone?: "ok" | "warn" | "err" }) {
+  const tone = props.tone ?? "ok";
+  const cls =
+    tone === "err"
+      ? "text-red-600"
+      : tone === "warn"
+      ? "text-amber-600"
+      : "text-slate-500";
+  return <p className={cn("text-xs mt-2", cls)}>{props.children}</p>;
+}
 
-/**
- * ---------- FIELDS ----------
- */
+/** =======================
+ *  Login / Register
+ *  ======================= */
+function AuthGate(props: { onAuthed: (a: AuthState) => void }) {
+  const [tab, setTab] = useState<"login" | "register">("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<Role>("BA/PMO");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    seedUsersIfEmpty();
+  }, []);
+
+  function handleLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const auth = verifyPassword(username.trim(), password);
+    if (!auth) {
+      setError("Invalid username or password.");
+      return;
+    }
+    setAuth(auth);
+    props.onAuthed(auth);
+  }
+  function handleRegister(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const u = username.trim();
+    if (!u || !password) {
+      setError("Username and password are required.");
+      return;
+    }
+    const users = readUsers();
+    if (users[u]) {
+      setError("User already exists.");
+      return;
+    }
+    upsertUser({ username: u, password, role });
+    const auth: AuthState = { username: u, role };
+    setAuth(auth);
+    props.onAuthed(auth);
+  }
+
+  return (
+    <div className="min-h-screen grid place-items-center bg-gradient-to-b from-slate-50 to-white p-6">
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle>
+            {tab === "login" ? "Sign in" : "Create an account"}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex gap-2 mb-4">
+            <Button
+              variant={tab === "login" ? "solid" : "outline"}
+              onClick={() => setTab("login")}
+              className="flex-1"
+            >
+              Login
+            </Button>
+            <Button
+              variant={tab === "register" ? "solid" : "outline"}
+              onClick={() => setTab("register")}
+              className="flex-1"
+            >
+              Register
+            </Button>
+          </div>
+
+          <form onSubmit={tab === "login" ? handleLogin : handleRegister} className="space-y-3">
+            <div>
+              <Label requiredMark>Username</Label>
+              <Input value={username} onChange={(e) => setUsername(e.target.value)} />
+            </div>
+            <div>
+              <Label requiredMark>Password</Label>
+              <Input
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                type="password"
+              />
+            </div>
+
+            {tab === "register" && (
+              <div>
+                <Label requiredMark>Role</Label>
+                <select
+                  value={role}
+                  onChange={(e) => setRole(e.target.value as Role)}
+                  className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
+                >
+                  <option>BA/PMO</option>
+                  <option>Developer</option>
+                </select>
+              </div>
+            )}
+
+            <Button type="submit" className="w-full">
+              {tab === "login" ? "Login" : "Register & Continue"}
+            </Button>
+
+            {tab === "login" && (
+              <HelperText>
+                Demo users — BA/PMO: <b>ba/1234</b>, Dev: <b>dev/1234</b>, Admin:{" "}
+                <b>admin/admin</b>
+              </HelperText>
+            )}
+            {error && <HelperText tone="err">{error}</HelperText>}
+            <HelperText tone="warn">
+              Demo only: credentials are stored in your browser (localStorage). For
+              production, use a backend/IdP.
+            </HelperText>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+/** =======================
+ *  Estimator logic
+ *  ======================= */
+const FACTORS = {
+  TaskType: { Feature: 1.0, Bug: 1.1, Refactor: 0.9, Spike: 1.1 },
+  Complexity: { Simple: 0.75, Medium: 1.0, High: 1.5, "Very High": 2.0 },
+  CodeImpact: { Modify: 1.0, New: 1.3, BugFix: 1.1, Refactor: 0.9, Spike: 1.2 },
+  Dependencies: { None: 0.9, Few: 1.0, Many: 1.2, External: 1.4 },
+  TechNovelty: { Familiar: 0.9, Mixed: 1.1, New: 1.3 },
+  MeetingsLoad: { Low: 0.9, Medium: 1.0, High: 1.2 },
+  DeveloperLevel: { Senior: 0.8, Mid: 1.0, Junior: 1.2 },
+  LOCBucket: { "<100": 0.8, "100–300": 1.0, "300–700": 1.3, ">700": 1.6 },
+  AvailabilityFactor: { "100%": 1.0, "50%": 1.5, "25%": 1.75 },
+} as const;
+const RISK = { Low: 0.05, Medium: 0.15, High: 0.3 } as const;
+
+function product(values: number[]): number {
+  return values.reduce((a, v) => a * v, 1);
+}
+function ceil(num: number, precision = 0): number {
+  const p = Math.pow(10, precision);
+  return Math.ceil(num * p) / p;
+}
+function addWorkdays(start: Date, nDays: number): Date {
+  let daysRemaining = nDays;
+  const d = new Date(start);
+  d.setHours(0, 0, 0, 0);
+  while (daysRemaining > 0) {
+    d.setDate(d.getDate() + 1);
+    const day = d.getDay();
+    if (day !== 0 && day !== 6) daysRemaining -= 1;
+  }
+  return d;
+}
+function formatDateISO(d: Date | null): string {
+  if (!d) return "";
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Fields & KV reused */
 function NumberField({
   label,
   value,
@@ -171,7 +348,6 @@ function NumberField({
     </div>
   );
 }
-
 function SelectField<T extends string>({
   label,
   value,
@@ -203,7 +379,6 @@ function SelectField<T extends string>({
     </div>
   );
 }
-
 function KV({
   label,
   value,
@@ -229,11 +404,9 @@ function KV({
   );
 }
 
-/**
- * ---------- MAIN APP ----------
- */
-export default function App() {
-  const [role, setRole] = useState<"BA/PMO" | "Developer">("BA/PMO");
+/** The estimator proper (your original UI) */
+function FactorEffortEstimator({ roleFromAuth }: { roleFromAuth: Role }) {
+  const [role, setRole] = useState<Role>(roleFromAuth);
   const [baseEffort, setBaseEffort] = useState(8);
   const [focusHoursPerDay, setFocusHoursPerDay] = useState(5);
   const [availabilityFactor, setAvailabilityFactor] =
@@ -307,7 +480,7 @@ export default function App() {
   }, [startDateStr, workingDaysNeeded]);
 
   function resetAll() {
-    setRole("BA/PMO");
+    setRole(roleFromAuth);
     setBaseEffort(8);
     setFocusHoursPerDay(5);
     setAvailabilityFactor("100%");
@@ -329,7 +502,6 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white p-6">
       <div className="mx-auto max-w-5xl grid md:grid-cols-5 gap-6">
-        {/* ---------- Inputs Card ---------- */}
         <Card className="md:col-span-2">
           <CardHeader>
             <CardTitle>Effort Estimator — Inputs</CardTitle>
@@ -458,7 +630,6 @@ export default function App() {
           </CardContent>
         </Card>
 
-        {/* ---------- Results Card ---------- */}
         <Card className="md:col-span-3">
           <CardHeader>
             <CardTitle>Results</CardTitle>
@@ -468,44 +639,62 @@ export default function App() {
               <KV label="Role" value={role} />
               <KV label="Multiplier Product" value={multiplierProduct.toFixed(3)} />
               <KV label="Effort (Base) – hrs" value={effortBase.toFixed(2)} />
-              <KV
-                label="Risk Buffer"
-                value={`${Math.round(RISK[risk] * 100)}%`}
-              />
-              <KV
-                label="Effort (With Risk) – hrs"
-                value={effortWithRisk.toFixed(2)}
-                emphasize
-              />
+              <KV label="Risk Buffer" value={`${Math.round(RISK[risk] * 100)}%`} />
+              <KV label="Effort (With Risk) – hrs" value={effortWithRisk.toFixed(2)} emphasize />
               <KV
                 label="Availability (capacity)"
-                value={`${availabilityFactor} (×${FACTORS.AvailabilityFactor[
-                  availabilityFactor
-                ].toFixed(2)})`}
+                value={`${availabilityFactor} (×${FACTORS.AvailabilityFactor[availabilityFactor].toFixed(2)})`}
               />
-              <KV
-                label="Focus Hours/Day"
-                value={focusHoursPerDay.toFixed(2)}
-              />
-              <KV
-                label="Working Days Needed"
-                value={workingDaysNeeded.toString()}
-                emphasize
-              />
-              <KV
-                label="Projected End Date"
-                value={formatDateISO(endDate)}
-                emphasize
-              />
+              <KV label="Focus Hours/Day" value={focusHoursPerDay.toFixed(2)} />
+              <KV label="Working Days Needed" value={workingDaysNeeded.toString()} emphasize />
+              <KV label="Projected End Date" value={formatDateISO(endDate)} emphasize />
             </div>
             <p className="text-xs text-slate-500 mt-4">
-              Note: End date excludes weekends. Base Effort and Focus
-              Hours/Day are required (&gt; 0). To handle public holidays,
-              extend the calculator to skip a list of holiday dates.
+              Note: End date excludes weekends. For public holidays, extend to skip a list of holiday dates.
             </p>
           </CardContent>
         </Card>
       </div>
+    </div>
+  );
+}
+
+/** =======================
+ *  App Root: Gate + Estimator + Logout
+ *  ======================= */
+export default function App() {
+  const [auth, setAuthState] = useState<AuthState>(null);
+
+  useEffect(() => {
+    seedUsersIfEmpty();
+    const existing = getAuth();
+    if (existing) setAuthState(existing);
+  }, []);
+
+  function handleLogout() {
+    setAuth(null);
+    setAuthState(null);
+  }
+
+  if (!auth) {
+    return <AuthGate onAuthed={(a) => setAuthState(a)} />;
+  }
+
+  return (
+    <div>
+      <div className="w-full bg-white/70 backdrop-blur border-b px-4 py-2 flex items-center justify-between sticky top-0 z-10">
+        <div className="text-sm text-slate-600">
+          Signed in as <b>{auth.username}</b> · Role: <b>{auth.role}</b>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setAuthState({ ...auth, role: auth.role === "BA/PMO" ? "Developer" : "BA/PMO" })}>
+            Switch role (demo)
+          </Button>
+          <Button onClick={handleLogout}>Logout</Button>
+        </div>
+      </div>
+
+      <FactorEffortEstimator roleFromAuth={auth.role} />
     </div>
   );
 }
