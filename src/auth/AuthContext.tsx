@@ -1,102 +1,116 @@
+// src/auth/AuthContext.tsx
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { supabase } from "@/lib/supabase";
 
 export type SystemRole = "admin" | "estimator";
 export type EstimatorPersona = "BA/PMO" | "Developer";
 
 export interface User {
-  username: string;
-  systemRole: SystemRole;
-  persona?: EstimatorPersona; // only for estimators
-}
-
-export type UserEntry = {
-  password: string;
+  id: string;
+  email: string;
   systemRole: SystemRole;
   persona?: EstimatorPersona;
-};
+  username?: string | null;
+}
 
-type UserMap = Record<string, UserEntry>;
+export type Profile = {
+  id: string;
+  username: string | null;
+  role: SystemRole;
+  persona: EstimatorPersona | null;
+  created_at: string;
+};
 
 type AuthContextType = {
   user: User | null;
-  login: (username: string, password: string) => Promise<boolean>;
-  logout: () => void;
-  users: UserMap;
-  upsertUser: (username: string, entry: UserEntry) => void;
-  deleteUser: (username: string) => void;
+  loading: boolean;
+  login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  signup: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  logout: () => Promise<void>;
+  listProfiles: () => Promise<Profile[]>;
+  updateProfile: (id: string, fields: Partial<Pick<Profile, "username" | "role" | "persona">>) => Promise<{ ok: boolean; error?: string }>;
 };
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const DEFAULT_USERS: UserMap = {
-  admin: { password: "admin123", systemRole: "admin" },
-  ba:    { password: "ba123",    systemRole: "estimator", persona: "BA/PMO" },
-  dev:   { password: "dev123",   systemRole: "estimator", persona: "Developer" },
-};
-
-const STORAGE_USER_KEY = "auth_user";
-const STORAGE_USERS_KEY = "auth_users";
-
-function loadUsers(): UserMap {
-  const raw = localStorage.getItem(STORAGE_USERS_KEY);
-  if (!raw) return DEFAULT_USERS;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") return parsed as UserMap;
-  } catch {}
-  return DEFAULT_USERS;
-}
-
-function saveUsers(map: UserMap) {
-  localStorage.setItem(STORAGE_USERS_KEY, JSON.stringify(map));
-}
-
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [users, setUsers] = useState<UserMap>({});
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setUsers(loadUsers());
-    const rawUser = localStorage.getItem(STORAGE_USER_KEY);
-    if (rawUser) {
-      try { setUser(JSON.parse(rawUser) as User); } catch {}
-    }
+    supabase.auth.getSession().then(async ({ data }) => {
+      const u = data.session?.user;
+      if (u) await hydrateUser(u.id, u.email ?? "");
+      else setUser(null);
+      setLoading(false);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      const u = session?.user;
+      if (u) await hydrateUser(u.id, u.email ?? "");
+      else setUser(null);
+    });
+    return () => { sub.subscription.unsubscribe(); };
   }, []);
 
-  const login = async (username: string, password: string) => {
-    const entry = users[username];
-    if (entry && entry.password === password) {
-      const u: User = { username, systemRole: entry.systemRole, persona: entry.persona };
-      setUser(u);
-      localStorage.setItem(STORAGE_USER_KEY, JSON.stringify(u));
-      return true;
+  async function hydrateUser(uid: string, email: string) {
+    const { data, error } = await supabase.from("profiles").select("*").eq("id", uid).maybeSingle();
+    if (error) { console.error(error); return; }
+    if (!data) {
+      const { error: upErr } = await supabase.from("profiles").insert({
+        id: uid, username: email, role: "estimator", persona: "Developer"
+      });
+      if (upErr) console.error(upErr);
+      setUser({ id: uid, email, systemRole: "estimator", persona: "Developer", username: email });
+      return;
     }
-    return false;
-  };
+    setUser({
+      id: data.id,
+      email,
+      systemRole: data.role,
+      persona: data.persona ?? undefined,
+      username: data.username,
+    });
+  }
 
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem(STORAGE_USER_KEY);
-  };
+  async function login(email: string, password: string) {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) return { ok: false, error: error.message };
+    if (data.user) await hydrateUser(data.user.id, data.user.email ?? email);
+    return { ok: true };
+  }
 
-  const upsertUser = (username: string, entry: UserEntry) => {
-    const next = { ...users, [username]: entry };
-    setUsers(next);
-    saveUsers(next);
-  };
+  async function signup(email: string, password: string) {
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    if (error) return { ok: false, error: error.message };
+    if (data.user) await hydrateUser(data.user.id, data.user.email ?? email);
+    return { ok: true };
+  }
 
-  const deleteUser = (username: string) => {
-    const next = { ...users };
-    delete next[username];
-    setUsers(next);
-    saveUsers(next);
-    if (user?.username === username) logout();
-  };
+  async function logout() { await supabase.auth.signOut(); }
 
-  const value = useMemo(
-    () => ({ user, login, logout, users, upsertUser, deleteUser }),
-    [user, users]
-  );
+  async function listProfiles() {
+    const { data, error } = await supabase.from("profiles").select("*").order("created_at", { ascending: false });
+    if (error) throw error;
+    return data as Profile[];
+  }
+
+  async function updateProfile(id: string, fields: Partial<Pick<Profile, "username" | "role" | "persona">>) {
+    const { error } = await supabase.from("profiles").update(fields).eq("id", id);
+    if (error) return { ok: false, error: error.message };
+    if (user && user.id === id) {
+      setUser({
+        ...user,
+        systemRole: (fields as any).role ?? user.systemRole,
+        persona: (fields as any).persona ?? user.persona,
+        username: (fields as any).username ?? user.username,
+      });
+    }
+    return { ok: true };
+  }
+
+  const value = useMemo(() => ({
+    user, loading, login, signup, logout, listProfiles, updateProfile
+  }), [user, loading]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
