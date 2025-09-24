@@ -3,10 +3,8 @@ import react from '@vitejs/plugin-react'
 import path from 'path'
 
 export default defineConfig({
-  base: '/factor-effort-estimator/',   // <<-- change this line
+  base: '/factor-effort-estimator/',   
   plugins: [react()],
-  resolve: {
-    alias: { '@': path.resolve(__dirname, 'src') },
-  },
+  resolve: { alias: { '@': path.resolve(__dirname, 'src') } },
 })
 
